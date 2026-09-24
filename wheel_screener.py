@@ -9,8 +9,8 @@ Automatisch geprüft:
   KGV <= 50, Strike >= 15, Prämie >= 0,10, Rendite 30-40 % p. a.
   Analysten positiv, Kursziel deutlich über Kurs
   Earnings mindestens 30 Tage entfernt und erst nach dem Verfall
-  Put mit Laufzeit 30-45 Tage, Delta unter Grenze,
-  Strike unter Unterstützung und außerhalb der erwarteten Bewegung
+  Put mit Laufzeit 7-21 Tage, Delta unter Grenze, Strike unter Unterstützung
+  (erwartete Bewegung wird angezeigt, ist aber keine Pflicht)
   Liquidität (Open Interest, Spread), Mindestrendite
   Streuung: höchstens 2 Treffer pro Branche
 
@@ -35,13 +35,13 @@ except ImportError:
     Eulerpool = None
 
 CFG = dict(
-    min_dte=30, max_dte=45,
+    min_dte=7, max_dte=21,     # Laufzeit in Tagen wie im PowerX Optimizer
     min_days_to_earnings=30,
     max_rec_mean=2.5,          # Yahoo-Skala: 1 = Strong Buy ... 5 = Sell
     min_target_upside=0.10,    # Kursziel mind. 10 % über Kurs
     min_open_interest=100,
     max_spread_pct=0.25,       # Spread max. 25 % der Prämie
-    min_yield_pa=0.30,         # Rendite pro Jahr 30-40 % wie im PowerX Optimizer
+    min_yield_pa=0.30,         # Rendite pro Jahr 30-40 % auf volles Kapital (wie PXO)
     max_yield_pa=0.40,
     min_premium=0.10,          # Prämie mind. 0,10 je Aktie
     min_strike=15,
@@ -53,6 +53,7 @@ CFG = dict(
     max_per_sector=2,
     top_n=15,
     min_aaqs=6,
+    em_required=False,         # True = Strike muss außerhalb der erwarteten Bewegung liegen
 )
 OUT_DIR = os.environ.get("OUT_DIR", "docs")
 TODAY = dt.date.today()
@@ -235,7 +236,9 @@ def best_put(t, price, support, max_delta, earn_date):
         for _, o in puts.iterrows():
             K, bid, ask = float(o["strike"]), float(o["bid"] or 0), float(o["ask"] or 0)
             oi = 0 if pd.isna(o["openInterest"]) else int(o["openInterest"])
-            if K >= support or K > price - em or K < CFG["min_strike"] or bid <= 0 or ask <= 0:
+            if K >= support or K < CFG["min_strike"] or bid <= 0 or ask <= 0:
+                continue
+            if CFG["em_required"] and K > price - em:
                 continue
             mid = (bid + ask) / 2
             if mid < CFG["min_premium"] or (ask - bid) / mid > CFG["max_spread_pct"] or oi < CFG["min_open_interest"]:
@@ -279,7 +282,7 @@ def write_report(df, vix, above, max_delta, regime):
 <div><dt>Kurs</dt><dd>{fmt(r.price)}</dd></div>
 <div><dt>Unterstützung</dt><dd>{fmt(r.support)}</dd></div>
 <div><dt>Abstand zum Strike</dt><dd>{fmt((r.price-r.strike)/r.price*100,1)} %</dd></div>
-<div><dt>Erwartete Bewegung</dt><dd>±{fmt(r.em)}</dd></div>
+<div><dt>Erwartete Bewegung</dt><dd>±{fmt(r.em)} {'(Strike außerhalb)' if r.strike <= r.price - r.em else '(Strike innerhalb)'}</dd></div>
 <div><dt>Earnings</dt><dd>{r.earnings.strftime('%d.%m.%Y')}</dd></div>
 <div><dt>Kursziel Analysten</dt><dd>{fmt(r.target)} (+{fmt(r.upside*100,0)} %)</dd></div>
 <div><dt>AAQS</dt><dd>{ep_txt(r.aaqs, 1)}</dd></div>
