@@ -5,6 +5,8 @@ Wheel-Screener: sucht täglich Cash-Secured Puts, die deine Wheel-Kriterien erf�
 Automatisch geprüft:
   Marktumfeld (VIX, S&P 500 über 200-Tage-Linie) -> maximales Delta
   Trend dreht nach oben (über 200-Tage-Linie, RSI dreht aus Rücksetzer)
+  PowerX-Signal frisch grün (RSI 7, Stochastik 14/3/3, MACD 12/26/9)
+  KGV <= 50, Strike >= 15, Prämie >= 0,10, Rendite 30-40 % p. a.
   Analysten positiv, Kursziel deutlich über Kurs
   Earnings mindestens 30 Tage entfernt und erst nach dem Verfall
   Put mit Laufzeit 30-45 Tage, Delta unter Grenze,
@@ -39,9 +41,14 @@ CFG = dict(
     min_target_upside=0.10,    # Kursziel mind. 10 % über Kurs
     min_open_interest=100,
     max_spread_pct=0.25,       # Spread max. 25 % der Prämie
-    min_yield_pa=0.10,         # mind. 10 % Rendite pro Jahr
+    min_yield_pa=0.30,         # Rendite pro Jahr 30-40 % wie im PowerX Optimizer
+    max_yield_pa=0.40,
+    min_premium=0.10,          # Prämie mind. 0,10 je Aktie
+    min_strike=15,
+    max_pe=50,                 # KGV höchstens 50
     risk_free=0.04,
-    min_price=20,
+    min_price=15,
+    powerx_fresh_days=10,      # PowerX muss in den letzten 10 Tagen auf grün gedreht sein
     min_market_cap=10e9,       # nur große, liquide Werte
     max_per_sector=2,
     top_n=15,
@@ -91,6 +98,24 @@ def trend_turn(df):
     r = rsi(c)
     r_min, r_now = r.iloc[-10:].min(), r.iloc[-1]
     return c.iloc[-1] > sma200 and c.iloc[-1] > sma10 and r_min < 45 and r_now > r_min + 5 and r_now < 65
+
+
+def powerx_green_days(df):
+    """PowerX-Signal: RSI(7) > 50, Slow Stochastik(14,3,3) > 50, MACD(12,26,9) über Signallinie.
+    Gibt zurück, seit wie vielen Tagen das Signal grün ist (0 = heute nicht grün)."""
+    c, h, l = df["Close"], df["High"], df["Low"]
+    r7 = rsi(c, 7)
+    fast_k = (c - l.rolling(14).min()) / (h.rolling(14).max() - l.rolling(14).min()) * 100
+    slow_k = fast_k.rolling(3).mean()
+    macd = c.ewm(span=12, adjust=False).mean() - c.ewm(span=26, adjust=False).mean()
+    hist = macd - macd.ewm(span=9, adjust=False).mean()
+    green = ((r7 > 50) & (slow_k > 50) & (hist > 0)).fillna(False).tolist()
+    n = 0
+    for g in reversed(green):
+        if not g:
+            break
+        n += 1
+    return n
 
 
 def support_level(df, price):
@@ -210,21 +235,22 @@ def best_put(t, price, support, max_delta, earn_date):
         for _, o in puts.iterrows():
             K, bid, ask = float(o["strike"]), float(o["bid"] or 0), float(o["ask"] or 0)
             oi = 0 if pd.isna(o["openInterest"]) else int(o["openInterest"])
-            if K >= support or K > price - em or bid <= 0 or ask <= 0:
+            if K >= support or K > price - em or K < CFG["min_strike"] or bid <= 0 or ask <= 0:
                 continue
             mid = (bid + ask) / 2
-            if (ask - bid) / mid > CFG["max_spread_pct"] or oi < CFG["min_open_interest"]:
+            if mid < CFG["min_premium"] or (ask - bid) / mid > CFG["max_spread_pct"] or oi < CFG["min_open_interest"]:
                 continue
             iv = float(o["impliedVolatility"]) if o["impliedVolatility"] > 0.05 else iv_atm
             d = put_delta(price, K, T, iv, CFG["risk_free"])
             if d is None or d > max_delta:
                 continue
             y = mid / K * 365 / dte
-            if y < CFG["min_yield_pa"]:
+            if not (CFG["min_yield_pa"] <= y <= CFG["max_yield_pa"]):
                 continue
             cand = dict(expiry=e, dte=dte, strike=K, premium=round(mid, 2), delta=round(d, 3),
                         yield_pa=y, em=em, iv=iv_atm, oi=oi)
-            if best is None or y > best["yield_pa"]:
+            # Sicherheit zuerst: im Renditekorridor den Put mit dem niedrigsten Delta nehmen
+            if best is None or d < best["delta"]:
                 best = cand
     return best
 
@@ -259,7 +285,7 @@ def write_report(df, vix, above, max_delta, regime):
 <div><dt>AAQS</dt><dd>{ep_txt(r.aaqs, 1)}</dd></div>
 <div><dt>Fair Value</dt><dd>{ep_txt(r.fair_value)}{'' if r.fair_value is None or pd.isna(r.fair_value) else f" (Kurs {fmt((1-r.price/r.fair_value)*100,0)} % darunter)"}</dd></div>
 </dl>
-<p class="meta">{r.sector}, Open Interest {r.oi}.</p>
+<p class="meta">{r.sector}, KGV {fmt(r.pe,1)}, PowerX grün seit {r.powerx_days} Tag{'en' if r.powerx_days>1 else ''}, Open Interest {r.oi}.</p>
 </article>""")
     body = "\n".join(cards) if cards else "<p class='empty'>Heute erfüllt keine Aktie alle Kriterien. Kein Trade ist auch ein Trade.</p>"
     html = f"""<!DOCTYPE html><html lang="de"><head><meta charset="UTF-8">
@@ -294,6 +320,7 @@ def main():
     hist = yf.download(tickers, period="1y", group_by="ticker", auto_adjust=True, threads=True, progress=False)
 
     stage1 = []
+    funnel = {"Trend dreht nach oben": 0, "PowerX frisch grün": 0}
     for tk in tickers:
         try:
             df = hist[tk].dropna(how="all") if len(tickers) > 1 else hist.dropna(how="all")
@@ -302,40 +329,57 @@ def main():
         if len(df) < 210:
             continue
         price = float(df["Close"].iloc[-1])
-        if price >= CFG["min_price"] and trend_turn(df):
-            stage1.append((tk, df, price))
-    print(f"{len(stage1)} Aktien mit Trenddreh, prüfe Fundamentaldaten und Optionen ...")
+        if price < CFG["min_price"] or not trend_turn(df):
+            continue
+        funnel["Trend dreht nach oben"] += 1
+        gd = powerx_green_days(df)
+        if 1 <= gd <= CFG["powerx_fresh_days"]:
+            funnel["PowerX frisch grün"] += 1
+            stage1.append((tk, df, price, gd))
+    print(f"{funnel['Trend dreht nach oben']} Aktien mit Trenddreh, davon {len(stage1)} mit frischem PowerX-Signal.")
+    print("Prüfe Fundamentaldaten und Optionen ...")
+    drop = {k: 0 for k in ["Marktkapitalisierung", "Analysten/Kursziel", "KGV über 50", "Earnings zu nah",
+                           "Kein passender Put", "AAQS unter 6", "Nicht unterbewertet", "Fehler"]}
 
     rows = []
-    for tk, df, price in stage1:
+    for tk, df, price, gd in stage1:
         try:
             t = yf.Ticker(tk)
             info = t.info
             rec, tgt = info.get("recommendationMean"), info.get("targetMeanPrice")
             if (info.get("marketCap") or 0) < CFG["min_market_cap"]:
-                continue
+                drop["Marktkapitalisierung"] += 1; continue
             if rec is None or rec > CFG["max_rec_mean"] or not tgt or tgt < price * (1 + CFG["min_target_upside"]):
-                continue
+                drop["Analysten/Kursziel"] += 1; continue
+            pe = info.get("trailingPE")
+            if pe is None or pe <= 0 or pe > CFG["max_pe"]:
+                drop["KGV über 50"] += 1; continue
             earn = next_earnings(t)
             if earn is None or (earn - TODAY).days < CFG["min_days_to_earnings"]:
-                continue
+                drop["Earnings zu nah"] += 1; continue
             sup = support_level(df, price)
             put = best_put(t, price, sup, max_delta, earn)
             if not put:
-                continue
+                drop["Kein passender Put"] += 1; continue
             aaqs, fair = eulerpool_check(tk, t)
             if aaqs is not None and aaqs < CFG["min_aaqs"]:
+                drop["AAQS unter 6"] += 1
                 print(f"  {tk}: AAQS {aaqs} zu niedrig")
                 continue
             if fair is not None and price >= fair:
+                drop["Nicht unterbewertet"] += 1
                 print(f"  {tk}: nicht unterbewertet (Kurs {price:.2f}, Fair Value {fair:.2f})")
                 continue
             rows.append(dict(ticker=tk, name=info.get("shortName", tk), sector=info.get("sector", "Unbekannt"),
                              price=price, support=sup, rec=rec, target=tgt, upside=tgt / price - 1,
-                             earnings=earn, aaqs=aaqs, fair_value=fair, **put))
+                             earnings=earn, aaqs=aaqs, fair_value=fair, pe=pe, powerx_days=gd, **put))
             print(f"  Treffer: {tk} Put {put['strike']} {put['expiry']}")
         except Exception as ex:
+            drop["Fehler"] += 1
             print(f"  {tk}: übersprungen ({ex})", file=sys.stderr)
+    print("Ausgeschieden nach Kriterium:")
+    for k, v in drop.items():
+        print(f"  {k}: {v}")
 
     res = pd.DataFrame(rows)
     if not res.empty:
