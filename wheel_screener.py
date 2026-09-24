@@ -128,6 +128,9 @@ def support_level(df, price):
 
 
 def next_earnings(t):
+    """Nächster Earnings-Termin, bewusst vorsichtig: frühester Wert aus
+    Yahoo-Kalender, Yahoo-Earnings-Liste und Schätzung (letzter Termin + 85 Tage)."""
+    cands = []
     try:
         cal = t.calendar
         if isinstance(cal, dict):
@@ -136,13 +139,24 @@ def next_earnings(t):
             ed = cal.loc["Earnings Date"].tolist()
         else:
             ed = None
-        if ed is None:
-            return None
-        ed = ed if isinstance(ed, (list, tuple)) else [ed]
-        future = [pd.Timestamp(x).date() for x in ed if pd.Timestamp(x).date() >= TODAY]
-        return min(future) if future else None
+        if ed is not None:
+            for x in (ed if isinstance(ed, (list, tuple)) else [ed]):
+                cands.append(pd.Timestamp(x).date())
     except Exception:
-        return None
+        pass
+    try:
+        eds = t.get_earnings_dates(limit=8)
+        if eds is not None and len(eds):
+            dates = sorted({pd.Timestamp(x).date() for x in eds.index})
+            cands += [d for d in dates if d >= TODAY]
+            past = [d for d in dates if d < TODAY]
+            if past:
+                est = max(past) + dt.timedelta(days=85)
+                cands.append(est if est >= TODAY else TODAY)
+    except Exception:
+        pass
+    future = [d for d in cands if d >= TODAY]
+    return min(future) if future else None
 
 
 def put_delta(S, K, T, iv, r):
@@ -212,6 +226,23 @@ def eulerpool_check(tk, t):
     aaqs = ep_call("AAQS", [(ep.aaqs.by_isin, isin), (ep.equity.aaqs, tk)], ["aaqs", "score"])
     fair = ep_call("FairValue", [(ep.fair_value.by_isin, isin)], ["fairvalue", "fair"])
     return aaqs, fair
+
+
+def eulerpool_probe(tk="NFLX"):
+    """Einmaliger Test: zeigt, welche Options- und Earnings-Daten Eulerpool liefert."""
+    ep = ep_client()
+    if ep is None:
+        print("Eulerpool-Test: kein API-Schlüssel gefunden")
+        return
+    tests = [("Options-Greeks", lambda: ep.derivatives.options_greeks(tk)),
+             ("IV-Surface", lambda: ep.derivatives.options_iv_surface(tk)),
+             ("Earnings-Termin", lambda: ep.calendar.earnings_by_symbol(tk))]
+    for name, fn in tests:
+        try:
+            res = fn()
+            print(f"[Eulerpool-Test {name} {tk}] {str(res)[:700]}")
+        except Exception as ex:
+            print(f"[Eulerpool-Test {name} {tk}] nicht verfügbar: {ex}")
 
 
 # ---------- Optionen ----------
@@ -336,6 +367,7 @@ dl{{display:grid;grid-template-columns:1fr 1fr;gap:6px 12px;margin:0}} dt{{font-
 def main():
     vix, above, max_delta, regime = market_regime()
     print(f"Markt: {regime}, VIX {vix:.1f}, max. Delta {max_delta}")
+    eulerpool_probe()
     tickers = load_universe()
     print(f"Scanne {len(tickers)} Aktien ...")
     hist = yf.download(tickers, period="1y", group_by="ticker", auto_adjust=True, threads=True, progress=False)
