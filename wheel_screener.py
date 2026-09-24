@@ -216,7 +216,11 @@ def eulerpool_check(tk, t):
 
 # ---------- Optionen ----------
 def best_put(t, price, support, max_delta, earn_date):
+    """Gibt (bester Put oder None, Diagnose) zurück."""
     best = None
+    diag = {"Laufzeiten": 0, "kein Preis": 0, "Liquidität/Spread": 0, "Delta zu hoch": 0,
+            "nicht unter Unterstützung": 0, "Rendite unter Minimum": 0, "Rendite über Maximum": 0}
+    near = None  # bester Put, der nur an Unterstützung oder Rendite scheitert
     for e in t.options:
         exp = dt.date.fromisoformat(e)
         dte = (exp - TODAY).days
@@ -224,6 +228,7 @@ def best_put(t, price, support, max_delta, earn_date):
             continue
         if earn_date and earn_date <= exp:
             continue
+        diag["Laufzeiten"] += 1
         puts = t.option_chain(e).puts
         if puts.empty:
             continue
@@ -236,26 +241,39 @@ def best_put(t, price, support, max_delta, earn_date):
         for _, o in puts.iterrows():
             K, bid, ask = float(o["strike"]), float(o["bid"] or 0), float(o["ask"] or 0)
             oi = 0 if pd.isna(o["openInterest"]) else int(o["openInterest"])
-            if K >= support or K < CFG["min_strike"] or bid <= 0 or ask <= 0:
+            if K >= price or K < CFG["min_strike"]:
                 continue
-            if CFG["em_required"] and K > price - em:
-                continue
+            if bid <= 0 or ask <= 0:
+                diag["kein Preis"] += 1; continue
             mid = (bid + ask) / 2
             if mid < CFG["min_premium"] or (ask - bid) / mid > CFG["max_spread_pct"] or oi < CFG["min_open_interest"]:
-                continue
+                diag["Liquidität/Spread"] += 1; continue
             iv = float(o["impliedVolatility"]) if o["impliedVolatility"] > 0.05 else iv_atm
             d = put_delta(price, K, T, iv, CFG["risk_free"])
             if d is None or d > max_delta:
-                continue
+                diag["Delta zu hoch"] += 1; continue
             y = mid / K * 365 / dte
-            if not (CFG["min_yield_pa"] <= y <= CFG["max_yield_pa"]):
+            reason = None
+            if K >= support:
+                reason = "nicht unter Unterstützung"
+            elif CFG["em_required"] and K > price - em:
+                reason = "innerhalb erwarteter Bewegung"
+            elif y < CFG["min_yield_pa"]:
+                reason = "Rendite unter Minimum"
+            elif y > CFG["max_yield_pa"]:
+                reason = "Rendite über Maximum"
+            if reason:
+                diag[reason] = diag.get(reason, 0) + 1
+                if near is None or y > near["y"]:
+                    near = dict(K=K, e=e, d=d, y=y, why=reason)
                 continue
             cand = dict(expiry=e, dte=dte, strike=K, premium=round(mid, 2), delta=round(d, 3),
                         yield_pa=y, em=em, iv=iv_atm, oi=oi)
             # Sicherheit zuerst: im Renditekorridor den Put mit dem niedrigsten Delta nehmen
             if best is None or d < best["delta"]:
                 best = cand
-    return best
+    diag["near"] = near
+    return best, diag
 
 
 # ---------- Ausgabe ----------
@@ -361,9 +379,15 @@ def main():
             if earn is None or (earn - TODAY).days < CFG["min_days_to_earnings"]:
                 drop["Earnings zu nah"] += 1; continue
             sup = support_level(df, price)
-            put = best_put(t, price, sup, max_delta, earn)
+            put, diag = best_put(t, price, sup, max_delta, earn)
             if not put:
-                drop["Kein passender Put"] += 1; continue
+                drop["Kein passender Put"] += 1
+                nr = diag.pop("near")
+                info_txt = ", ".join(f"{k} {v}" for k, v in diag.items() if v)
+                near_txt = (f" | knapp: Strike {nr['K']:g} ({nr['e']}), Delta {nr['d']:.2f}, "
+                            f"{nr['y']*100:.0f} % p. a., scheitert an: {nr['why']}") if nr else ""
+                print(f"  {tk}: Kurs {price:.2f}, Unterstützung {sup:.2f} ({(sup/price-1)*100:.1f} %) | {info_txt or 'keine Laufzeit im Zeitfenster'}{near_txt}")
+                continue
             aaqs, fair = eulerpool_check(tk, t)
             if aaqs is not None and aaqs < CFG["min_aaqs"]:
                 drop["AAQS unter 6"] += 1
