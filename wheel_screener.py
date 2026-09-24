@@ -6,7 +6,7 @@ Automatisch geprüft:
   Marktumfeld (VIX, S&P 500 über 200-Tage-Linie) -> maximales Delta
   Trend dreht nach oben (über 200-Tage-Linie, RSI dreht aus Rücksetzer)
   PowerX-Signal frisch grün (RSI 7, Stochastik 14/3/3, MACD 12/26/9)
-  KGV <= 50, Strike >= 15, Prämie >= 0,10, Rendite 30-40 % p. a.
+  KGV <= 50, Strike >= 15, Prämie >= 0,10, Rendite 20-40 % p. a.
   Analysten positiv, Kursziel deutlich über Kurs
   Earnings mindestens 30 Tage entfernt und erst nach dem Verfall
   Put mit Laufzeit 7-21 Tage (ohne Wochenoptionen: nächste Monatsoption bis 28 Tage), Delta unter Grenze, Strike unter Unterstützung
@@ -42,7 +42,7 @@ CFG = dict(
     min_open_interest=50,
     max_spread_pct=0.35,       # Spread max. 35 % der Prämie (PXO-Beispiel NFLX: 28 %)
     max_dte_fallback=28,       # nur für Aktien ohne Wochenoptionen: nächste Monatsoption bis 28 Tage
-    min_yield_pa=0.30,         # Rendite pro Jahr 30-40 % auf volles Kapital (wie PXO)
+    min_yield_pa=0.20,         # Untergrenze 20 % p. a. (Ziel 30-40 %), auf volles Kapital wie PXO
     max_yield_pa=0.40,
     min_premium=0.10,          # Prämie mind. 0,10 je Aktie
     min_strike=15,
