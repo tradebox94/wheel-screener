@@ -1,1 +1,2 @@
-
+ticker,name,sector,price,support,rec,target,upside,earnings,aaqs,fair_value,pe,powerx_days,expiry,dte,strike,premium,delta,yield_pa,em,iv,oi,abstand_em,score
+TXN,Texas Instruments Incorporated,Technology,268.8599853515625,255.17999267578125,2.08333,324.7097,0.2077278795333124,2026-10-27,6.0,,40.89802,4,2026-10-09,15,255.0,3.16,0.234,0.3010653594771242,21.117826269349862,0.3874572973632812,172,0.6563168564218517,0.6319802082018399
