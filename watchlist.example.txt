@@ -1,0 +1,6 @@
+# Optional: in watchlist.txt umbenennen, dann wird nur diese Liste gescannt
+# statt des ganzen S&P 500. Ein Ticker pro Zeile.
+MSFT
+AAPL
+JNJ
+V
