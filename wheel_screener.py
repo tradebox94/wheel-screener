@@ -228,25 +228,76 @@ def eulerpool_check(tk, t):
     return aaqs, fair
 
 
-def eulerpool_probe(tk="NFLX"):
-    """Einmaliger Test: zeigt, welche Options- und Earnings-Daten Eulerpool liefert."""
-    ep = ep_client()
-    if ep is None:
-        print("Eulerpool-Test: kein API-Schlüssel gefunden")
-        return
-    tests = [("Options-Greeks", lambda: ep.derivatives.options_greeks(tk)),
-             ("IV-Surface", lambda: ep.derivatives.options_iv_surface(tk)),
-             ("Earnings-Termin", lambda: ep.calendar.earnings_by_symbol(tk))]
-    for name, fn in tests:
-        try:
-            res = fn()
-            print(f"[Eulerpool-Test {name} {tk}] {str(res)[:700]}")
-        except Exception as ex:
-            print(f"[Eulerpool-Test {name} {tk}] nicht verfügbar: {ex}")
+
+# ---------- Optionsketten: Eulerpool zuerst, Yahoo als Ersatz ----------
+SOURCE_STATS = {"Eulerpool": 0, "Yahoo": 0}
+_EP_PARAM = {"name": None}   # welcher Parameter bei Eulerpool die Laufzeit wählt
+
+
+def _ep_rows(res):
+    if isinstance(res, dict):
+        res = res.get("data") or res.get("options") or res.get("results") or []
+    return res if isinstance(res, list) else []
+
+
+def _ep_puts(rows, e):
+    out = []
+    for r in rows:
+        if str(r.get("type", "")).lower() != "put" or str(r.get("expiration_date", ""))[:10] != e:
+            continue
+        g = r.get("greeks") or {}
+        out.append(dict(strike=float(r.get("strike") or 0), bid=float(r.get("bid") or 0),
+                        ask=float(r.get("ask") or 0), openInterest=r.get("open_interest") or 0,
+                        impliedVolatility=float(r.get("impliedVol") or 0),
+                        delta=abs(float(g.get("delta") or 0))))
+    return pd.DataFrame(out)
+
+
+class ChainSource:
+    """Liefert Put-Ketten je Laufzeit für eine Aktie."""
+
+    def __init__(self, tk, t):
+        self.tk, self.t, self.ep_rows = tk, t, None
+        ep = ep_client()
+        if ep is not None:
+            try:
+                self.ep_rows = _ep_rows(ep.derivatives.options_greeks(tk))
+            except Exception as ex:
+                print(f"    Eulerpool Optionen {tk}: {ex}", file=sys.stderr)
+
+    def _ep_for(self, e):
+        if self.ep_rows is None:
+            return None
+        df = _ep_puts(self.ep_rows, e)
+        if len(df):
+            return df
+        ep = ep_client()
+        names = [_EP_PARAM["name"]] if _EP_PARAM["name"] else ["expiration", "expiration_date", "expiry"]
+        for n in names:
+            try:
+                rows = _ep_rows(ep.derivatives.options_greeks(self.tk, **{n: e}))
+            except Exception:
+                continue
+            df = _ep_puts(rows, e)
+            if len(df):
+                if _EP_PARAM["name"] is None:
+                    print(f"    Eulerpool: Laufzeit wird über Parameter '{n}' gewählt")
+                _EP_PARAM["name"] = n
+                self.ep_rows += rows
+                return df
+        return None
+
+    def puts(self, e):
+        df = self._ep_for(e)
+        if df is not None and len(df) and (df["bid"] > 0).any():
+            SOURCE_STATS["Eulerpool"] += 1
+            return df
+        SOURCE_STATS["Yahoo"] += 1
+        return self.t.option_chain(e).puts
 
 
 # ---------- Optionen ----------
-def best_put(t, price, support, max_delta, earn_date):
+def best_put(t, price, support, max_delta, earn_date, src=None):
     """Gibt (bester Put oder None, Diagnose) zurück."""
     best = None
     diag = {"Laufzeiten": 0, "kein Preis": 0, "Liquidität/Spread": 0, "Delta zu hoch": 0,
@@ -260,8 +311,8 @@ def best_put(t, price, support, max_delta, earn_date):
         if earn_date and earn_date <= exp:
             continue
         diag["Laufzeiten"] += 1
-        puts = t.option_chain(e).puts
-        if puts.empty:
+        puts = src.puts(e) if src else t.option_chain(e).puts
+        if puts is None or puts.empty:
             continue
         atm = puts.iloc[(puts["strike"] - price).abs().argsort()[:3]]
         iv_atm = float(atm["impliedVolatility"].median())
@@ -279,8 +330,9 @@ def best_put(t, price, support, max_delta, earn_date):
             mid = (bid + ask) / 2
             if mid < CFG["min_premium"] or (ask - bid) / mid > CFG["max_spread_pct"] or oi < CFG["min_open_interest"]:
                 diag["Liquidität/Spread"] += 1; continue
-            iv = float(o["impliedVolatility"]) if o["impliedVolatility"] > 0.05 else iv_atm
-            d = put_delta(price, K, T, iv, CFG["risk_free"])
+            iv = float(o["impliedVolatility"]) if 0.05 < o["impliedVolatility"] < 3 else iv_atm
+            ep_d = float(o["delta"]) if "delta" in o and not pd.isna(o["delta"]) else 0
+            d = ep_d if 0 < ep_d < 1 else put_delta(price, K, T, iv, CFG["risk_free"])
             if d is None or d > max_delta:
                 diag["Delta zu hoch"] += 1; continue
             y = mid / K * 365 / dte
@@ -367,7 +419,6 @@ dl{{display:grid;grid-template-columns:1fr 1fr;gap:6px 12px;margin:0}} dt{{font-
 def main():
     vix, above, max_delta, regime = market_regime()
     print(f"Markt: {regime}, VIX {vix:.1f}, max. Delta {max_delta}")
-    eulerpool_probe()
     tickers = load_universe()
     print(f"Scanne {len(tickers)} Aktien ...")
     hist = yf.download(tickers, period="1y", group_by="ticker", auto_adjust=True, threads=True, progress=False)
@@ -411,7 +462,7 @@ def main():
             if earn is None or (earn - TODAY).days < CFG["min_days_to_earnings"]:
                 drop["Earnings zu nah"] += 1; continue
             sup = support_level(df, price)
-            put, diag = best_put(t, price, sup, max_delta, earn)
+            put, diag = best_put(t, price, sup, max_delta, earn, ChainSource(tk, t))
             if not put:
                 drop["Kein passender Put"] += 1
                 nr = diag.pop("near")
@@ -436,6 +487,7 @@ def main():
         except Exception as ex:
             drop["Fehler"] += 1
             print(f"  {tk}: übersprungen ({ex})", file=sys.stderr)
+    print(f"Optionsketten: Eulerpool {SOURCE_STATS['Eulerpool']}, Yahoo {SOURCE_STATS['Yahoo']}")
     print("Ausgeschieden nach Kriterium:")
     for k, v in drop.items():
         print(f"  {k}: {v}")
