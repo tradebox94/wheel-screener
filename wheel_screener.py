@@ -9,7 +9,7 @@ Automatisch geprüft:
   KGV <= 50, Strike >= 15, Prämie >= 0,10, Rendite 30-40 % p. a.
   Analysten positiv, Kursziel deutlich über Kurs
   Earnings mindestens 30 Tage entfernt und erst nach dem Verfall
-  Put mit Laufzeit 7-21 Tage, Delta unter Grenze, Strike unter Unterstützung
+  Put mit Laufzeit 7-21 Tage (ohne Wochenoptionen: nächste Monatsoption bis 28 Tage), Delta unter Grenze, Strike unter Unterstützung
   (erwartete Bewegung wird angezeigt, ist aber keine Pflicht)
   Liquidität (Open Interest, Spread), Mindestrendite
   Streuung: höchstens 2 Treffer pro Branche
@@ -39,8 +39,9 @@ CFG = dict(
     min_days_to_earnings=30,
     max_rec_mean=2.5,          # Yahoo-Skala: 1 = Strong Buy ... 5 = Sell
     min_target_upside=0.10,    # Kursziel mind. 10 % über Kurs
-    min_open_interest=100,
-    max_spread_pct=0.25,       # Spread max. 25 % der Prämie
+    min_open_interest=50,
+    max_spread_pct=0.35,       # Spread max. 35 % der Prämie (PXO-Beispiel NFLX: 28 %)
+    max_dte_fallback=28,       # nur für Aktien ohne Wochenoptionen: nächste Monatsoption bis 28 Tage
     min_yield_pa=0.30,         # Rendite pro Jahr 30-40 % auf volles Kapital (wie PXO)
     max_yield_pa=0.40,
     min_premium=0.10,          # Prämie mind. 0,10 je Aktie
@@ -300,14 +301,16 @@ class ChainSource:
 def best_put(t, price, support, max_delta, earn_date, src=None):
     """Gibt (bester Put oder None, Diagnose) zurück."""
     best = None
-    diag = {"Laufzeiten": 0, "kein Preis": 0, "Liquidität/Spread": 0, "Delta zu hoch": 0,
+    diag = {"Laufzeiten": 0, "kein Preis": 0, "Prämie unter 0,10": 0, "Spread zu breit": 0,
+            "Open Interest zu niedrig": 0, "Delta zu hoch": 0,
             "nicht unter Unterstützung": 0, "Rendite unter Minimum": 0, "Rendite über Maximum": 0}
     near = None  # bester Put, der nur an Unterstützung oder Rendite scheitert
-    for e in t.options:
+    all_exp = [(e, (dt.date.fromisoformat(e) - TODAY).days) for e in t.options]
+    exps = [x for x in all_exp if CFG["min_dte"] <= x[1] <= CFG["max_dte"]]
+    if not exps:  # keine Wochenoptionen: nächste Monatsoption bis max_dte_fallback
+        exps = [x for x in all_exp if CFG["min_dte"] <= x[1] <= CFG["max_dte_fallback"]][:1]
+    for e, dte in exps:
         exp = dt.date.fromisoformat(e)
-        dte = (exp - TODAY).days
-        if not (CFG["min_dte"] <= dte <= CFG["max_dte"]):
-            continue
         if earn_date and earn_date <= exp:
             continue
         diag["Laufzeiten"] += 1
@@ -328,11 +331,17 @@ def best_put(t, price, support, max_delta, earn_date, src=None):
             if bid <= 0 or ask <= 0:
                 diag["kein Preis"] += 1; continue
             mid = (bid + ask) / 2
-            if mid < CFG["min_premium"] or (ask - bid) / mid > CFG["max_spread_pct"] or oi < CFG["min_open_interest"]:
-                diag["Liquidität/Spread"] += 1; continue
+            if mid < CFG["min_premium"]:
+                diag["Prämie unter 0,10"] += 1; continue
+            if (ask - bid) / mid > CFG["max_spread_pct"]:
+                diag["Spread zu breit"] += 1; continue
+            if oi < CFG["min_open_interest"]:
+                diag["Open Interest zu niedrig"] += 1; continue
             iv = float(o["impliedVolatility"]) if 0.05 < o["impliedVolatility"] < 3 else iv_atm
             ep_d = float(o["delta"]) if "delta" in o and not pd.isna(o["delta"]) else 0
-            d = ep_d if 0 < ep_d < 1 else put_delta(price, K, T, iv, CFG["risk_free"])
+            own_d = put_delta(price, K, T, iv, CFG["risk_free"]) or 0
+            # vorsichtig: das höhere der beiden Deltas zählt (Eulerpool-Delta wirkte teils zu niedrig)
+            d = max(ep_d, own_d) if 0 < ep_d < 1 else own_d
             if d is None or d > max_delta:
                 diag["Delta zu hoch"] += 1; continue
             y = mid / K * 365 / dte
