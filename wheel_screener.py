@@ -54,6 +54,7 @@ CFG = dict(
     max_per_sector=2,
     top_n=15,
     min_aaqs=6,
+    aaqs_borderline=5,         # AAQS 5: als Grenzfall getrennt anzeigen (im Terminal prüfen)
     em_required=False,         # True = Strike muss außerhalb der erwarteten Bewegung liegen
 )
 OUT_DIR = os.environ.get("OUT_DIR", "docs")
@@ -377,13 +378,10 @@ def ep_txt(x, d=2):
     return "in Eulerpool prüfen" if x is None or pd.isna(x) else fmt(x, d)
 
 
-def write_report(df, vix, above, max_delta, regime):
-    os.makedirs(OUT_DIR, exist_ok=True)
-    df.to_csv(os.path.join(OUT_DIR, "treffer.csv"), index=False)
-    colors = {"Ruhig": "#2E7D4F", "Vorsichtig": "#B7791F", "Angespannt": "#B23A34"}
+def cards_html(df, border=False):
     cards = []
     for i, r in enumerate(df.itertuples(), 1):
-        cards.append(f"""<article>
+        cards.append(f"""<article{' class="border"' if border else ''}>
 <h2>{i}. {r.ticker} <small>{r.name}</small></h2>
 <p class="put">Put {fmt(r.strike)} zum {dt.date.fromisoformat(r.expiry).strftime('%d.%m.%Y')} für ca. {fmt(r.premium)}</p>
 <dl>
@@ -400,7 +398,20 @@ def write_report(df, vix, above, max_delta, regime):
 </dl>
 <p class="meta">{r.sector}, KGV {fmt(r.pe,1)}, PowerX grün seit {r.powerx_days} Tag{'en' if r.powerx_days>1 else ''}, Open Interest {r.oi}.</p>
 </article>""")
-    body = "\n".join(cards) if cards else "<p class='empty'>Heute erfüllt keine Aktie alle Kriterien. Kein Trade ist auch ein Trade.</p>"
+    return "\n".join(cards)
+
+
+def write_report(df, vix, above, max_delta, regime, border=None):
+    os.makedirs(OUT_DIR, exist_ok=True)
+    border = border if border is not None else pd.DataFrame()
+    pd.concat([df, border]).to_csv(os.path.join(OUT_DIR, "treffer.csv"), index=False)
+    colors = {"Ruhig": "#2E7D4F", "Vorsichtig": "#B7791F", "Angespannt": "#B23A34"}
+    body = cards_html(df) if len(df) else "<p class='empty'>Heute erfüllt keine Aktie alle Kriterien. Kein Trade ist auch ein Trade.</p>"
+    if len(border):
+        body += ("\n<h2 class='section'>Grenzfälle: AAQS im Terminal prüfen</h2>\n"
+                 "<p class='warn'>Diese Aktien haben laut Eulerpool-API einen AAQS von 5. API und Terminal können "
+                 "um einen Punkt abweichen. Nur handeln, wenn dein Eulerpool-Terminal mindestens 6 anzeigt.</p>\n"
+                 + cards_html(border, border=True))
     html = f"""<!DOCTYPE html><html lang="de"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>Wheel-Screener</title>
 <style>
@@ -413,6 +424,9 @@ h2{{margin:0;font-size:20px}} h2 small{{color:#5D6B69;font-weight:400;font-size:
 .put{{font-weight:600;color:#2F5D62;margin:4px 0 10px}}
 dl{{display:grid;grid-template-columns:1fr 1fr;gap:6px 12px;margin:0}} dt{{font-size:13px;color:#5D6B69}} dd{{margin:0;font-weight:600}}
 .meta{{font-size:14px;color:#5D6B69;margin:10px 0 0}} .empty{{text-align:center;color:#5D6B69;padding:30px}}
+h2.section{{margin:28px 0 6px;font-size:22px;color:#B7791F}}
+.warn{{background:#FBF4E6;border-left:5px solid #B7791F;padding:10px 12px;border-radius:0 8px 8px 0;font-size:15px}}
+article.border{{border:2px dashed #B7791F}}
 </style></head><body><main>
 <h1>Wheel-Screener</h1>
 <p class="sub">Stand {dt.datetime.now().strftime('%d.%m.%Y, %H:%M')} UTC, Yahoo-Daten, leicht verzögert</p>
@@ -452,7 +466,7 @@ def main():
     print(f"{funnel['Trend dreht nach oben']} Aktien mit Trenddreh, davon {len(stage1)} mit frischem PowerX-Signal.")
     print("Prüfe Fundamentaldaten und Optionen ...")
     drop = {k: 0 for k in ["Marktkapitalisierung", "Analysten/Kursziel", "KGV über 50", "Earnings zu nah",
-                           "Kein passender Put", "AAQS unter 6", "Nicht unterbewertet", "Fehler"]}
+                           "Kein passender Put", "AAQS unter 5", "Nicht unterbewertet", "Fehler"]}
 
     rows = []
     for tk, df, price, gd in stage1:
@@ -481,8 +495,9 @@ def main():
                 print(f"  {tk}: Kurs {price:.2f}, Unterstützung {sup:.2f} ({(sup/price-1)*100:.1f} %) | {info_txt or 'keine Laufzeit im Zeitfenster'}{near_txt}")
                 continue
             aaqs, fair = eulerpool_check(tk, t)
-            if aaqs is not None and aaqs < CFG["min_aaqs"]:
-                drop["AAQS unter 6"] += 1
+            borderline = aaqs is not None and CFG["aaqs_borderline"] <= aaqs < CFG["min_aaqs"]
+            if aaqs is not None and aaqs < CFG["aaqs_borderline"]:
+                drop["AAQS unter 5"] += 1
                 print(f"  {tk}: AAQS {aaqs} zu niedrig")
                 continue
             if fair is not None and price >= fair:
@@ -491,8 +506,9 @@ def main():
                 continue
             rows.append(dict(ticker=tk, name=info.get("shortName", tk), sector=info.get("sector", "Unbekannt"),
                              price=price, support=sup, rec=rec, target=tgt, upside=tgt / price - 1,
-                             earnings=earn, aaqs=aaqs, fair_value=fair, pe=pe, powerx_days=gd, **put))
-            print(f"  Treffer: {tk} Put {put['strike']} {put['expiry']}")
+                             earnings=earn, aaqs=aaqs, fair_value=fair, pe=pe, powerx_days=gd,
+                             grenzfall=borderline, **put))
+            print(f"  {'Grenzfall (AAQS 5)' if borderline else 'Treffer'}: {tk} Put {put['strike']} {put['expiry']}")
         except Exception as ex:
             drop["Fehler"] += 1
             print(f"  {tk}: übersprungen ({ex})", file=sys.stderr)
@@ -502,6 +518,7 @@ def main():
         print(f"  {k}: {v}")
 
     res = pd.DataFrame(rows)
+    border = pd.DataFrame()
     if not res.empty:
         res["abstand_em"] = (res["price"] - res["strike"]) / res["em"]
         # Sicherheit zuerst: niedriges Delta und großer Abstand zählen mehr als Rendite
@@ -509,9 +526,11 @@ def main():
                         + res["abstand_em"].clip(upper=2) / 2 * 0.3
                         + res["yield_pa"].clip(upper=0.4) / 0.4 * 0.2)
         res = res.sort_values("score", ascending=False)
+        border = res[res["grenzfall"]].head(5)
+        res = res[~res["grenzfall"]]
         res = res.groupby("sector", sort=False).head(CFG["max_per_sector"]).head(CFG["top_n"])
-    write_report(res, vix, above, max_delta, regime)
-    print(f"Fertig: {len(res)} Trades in {OUT_DIR}/index.html")
+    write_report(res, vix, above, max_delta, regime, border)
+    print(f"Fertig: {len(res)} Trades und {len(border)} Grenzfälle in {OUT_DIR}/index.html")
 
 
 if __name__ == "__main__":
