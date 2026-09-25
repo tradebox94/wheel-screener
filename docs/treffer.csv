@@ -1,1 +1,2 @@
-
+ticker,name,sector,price,support,rec,target,upside,earnings,aaqs,fair_value,pe,powerx_days,grenzfall,expiry,dte,strike,premium,delta,yield_pa,em,iv,oi,abstand_em,score
+ADI,"Analog Devices, Inc.",Technology,382.6099853515625,369.96280799598367,1.38235,470.71875,0.23028349499942724,2026-11-12,6.0,522.6496620335132,45.657516,4,False,2026-10-16,21,360.0,5.25,0.23,0.2534722222222222,34.00225558534516,0.3705,79,0.6649554555229952,0.6114794294395605
