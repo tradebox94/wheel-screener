@@ -1,1 +1,2 @@
-
+ticker,name,sector,price,support,rec,target,upside,earnings,aaqs,fair_value,pe,powerx_days,grenzfall,expiry,dte,strike,premium,delta,yield_pa,em,iv,oi,abstand_em,score
+CSCO,"Cisco Systems, Inc.",Technology,111.08000183105469,107.52999877929688,1.86207,136.16,0.22578319909546196,2026-11-05,,,33.355854,1,False,2026-10-23,21,107.0,1.25,0.267,0.20386070315976856,7.594635380141913,0.28504132934570303,201,0.5372215553261293,0.5490135848788036
