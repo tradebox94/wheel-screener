@@ -1,1 +1,2 @@
-
+ticker,name,sector,price,support,rec,target,upside,earnings,aaqs,fair_value,pe,powerx_days,grenzfall,expiry,dte,strike,premium,delta,yield_pa,em,iv,oi,abstand_em,score
+UNH,UnitedHealth Group Incorporated,Healthcare,390.7200012207031,381.4809738935195,1.57692,477.72,0.2226658438459459,2027-01-06,6.0,,25.127968,4,False,2026-10-23,9,360.0,2.38,0.179,0.2681172839506173,21.14860615458562,0.3447,387,1.4525780562631618,0.762445350414783
