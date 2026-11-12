@@ -335,12 +335,14 @@ class ChainSource:
             return self.t.option_chain(e).puts
         except Exception as ex:
             print(f"    Yahoo Optionen {self.tk} {e}: {ex}", file=sys.stderr)
+            dlog(self.tk, f"Yahoo-Optionskette {e} nicht abrufbar: {ex}")
             return None
 
     def puts(self, e):
         df = self._ep_for(e)
         if df is not None and len(df) and (df["bid"] > 0).any():
             missing = (df["bid"] <= 0) | (df["ask"] <= 0)
+            dlog(self.tk, f"Eulerpool {e}: {len(df)} Puts, davon {int(missing.sum())} ohne Preis")
             if missing.mean() > 0.2:
                 # Eulerpool liefert für viele Strikes keinen Preis: aus Yahoo ergänzen
                 y = self._yahoo(e)
@@ -360,6 +362,8 @@ class ChainSource:
                                 df.at[i, "openInterest"] = 0 if pd.isna(oi) else int(oi)
                             if not df.at[i, "impliedVolatility"]:
                                 df.at[i, "impliedVolatility"] = float(yr.get("impliedVolatility") or 0)
+                    still = int(((df["bid"] <= 0) | (df["ask"] <= 0)).sum())
+                    dlog(self.tk, f"Yahoo {e}: {len(y)} Puts geliefert, danach noch {still} ohne Preis")
                     SOURCE_STATS["Eulerpool + Yahoo-Preise"] += 1
                     return df
             SOURCE_STATS["Eulerpool"] += 1
@@ -369,7 +373,7 @@ class ChainSource:
 
 
 # ---------- Optionen ----------
-def best_put(t, price, support, max_delta, earn_date, src=None):
+def best_put(t, price, support, max_delta, earn_date, src=None, tk=None):
     """Gibt (bester Put oder None, Diagnose) zurück."""
     best = None
     diag = {"Laufzeiten": 0, "kein Preis": 0, "Prämie unter 0,10": 0, "Spread zu breit": 0,
@@ -399,6 +403,12 @@ def best_put(t, price, support, max_delta, earn_date, src=None):
             oi = 0 if pd.isna(o["openInterest"]) else int(o["openInterest"])
             if K >= price or K < CFG["min_strike"]:
                 continue
+            if tk in DIAG and K >= price * 0.90:   # Strikes bis 10 % unter Kurs einzeln zeigen
+                _iv = float(o["impliedVolatility"]) if 0.05 < (o["impliedVolatility"] or 0) < 3 else iv_atm
+                _d = put_delta(price, K, T, _iv, CFG["risk_free"]) or 0
+                _m = (bid + ask) / 2
+                dlog(tk, f"  {e} Strike {K:g}: Geld {bid:.2f} / Brief {ask:.2f}, OI {oi}, Delta ca. {_d:.2f}, "
+                         f"{(_m / K * 365 / dte * 100) if _m > 0 else 0:.0f} % p. a.")
             if bid <= 0 or ask <= 0:
                 diag["kein Preis"] += 1; continue
             mid = (bid + ask) / 2
@@ -586,7 +596,7 @@ def main():
                 fail("Earnings zu nah", f"Earnings {earn} (mind. {CFG['min_days_to_earnings']} Tage)"); continue
             dlog(tk, f"Earnings {earn} ({(earn-TODAY).days} Tage) ✓")
             sup = support_level(df, price)
-            put, diag = best_put(t, price, sup, max_delta, earn, ChainSource(tk, t))
+            put, diag = best_put(t, price, sup, max_delta, earn, ChainSource(tk, t), tk)
             if tk in DIAG:
                 nr = diag.get("near")
                 dlog(tk, f"Unterstützung {sup:.2f} ({(sup/price-1)*100:.1f} %), max. Delta {max_delta}, "
