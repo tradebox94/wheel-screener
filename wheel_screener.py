@@ -20,6 +20,10 @@ Automatisch geprüft:
   Liquidität (Open Interest, Spread), Mindestrendite
   Streuung: höchstens 2 Treffer pro Branche
 
+Optionskurse: Alpaca (wenn ALPACA_API_KEY und ALPACA_SECRET_KEY gesetzt sind, kostenloser
+  "indicative"-Feed), fehlende Werte aus Eulerpool und Yahoo. Ist der Spread in den Daten
+  unrealistisch breit, wird die Prämie aus der impliziten Volatilität geschätzt und markiert.
+
 Über die Eulerpool-API (wenn EULERPOOL_API_KEY gesetzt ist):
   AAQS >= 6 und Kurs unter dem Eulerpool Fair Value
 Daten: Yahoo Finance + Eulerpool. Keine Anlageberatung.
@@ -63,6 +67,8 @@ CFG = dict(
     min_aaqs=6,
     aaqs_borderline=5,         # AAQS 5: als Grenzfall getrennt anzeigen (im Terminal prüfen)
     em_required=False,         # True = Strike muss außerhalb der erwarteten Bewegung liegen
+    estimate_premium=True,     # Spread in den Daten unrealistisch breit: Prämie aus IV schätzen (zwischen Geld und Brief)
+    max_spread_est=1.5,        # bis zu dieser Spreadbreite (150 % der Prämie) wird geschätzt, darüber verworfen
     support_required=False,    # True = Strike muss unter der Unterstützung liegen (verträgt sich nicht mit
                                #        Einstieg direkt nach dem Dreh, deshalb nur angezeigt)
 )
@@ -209,6 +215,91 @@ def put_delta(S, K, T, iv, r):
     return abs(0.5 * (1 + math.erf(d1 / math.sqrt(2))) - 1)
 
 
+def put_price(S, K, T, iv, r):
+    """Theoretischer Put-Preis (Black-Scholes)."""
+    if iv <= 0 or T <= 0:
+        return None
+    N = lambda x: 0.5 * (1 + math.erf(x / math.sqrt(2)))
+    d1 = (math.log(S / K) + (r + iv * iv / 2) * T) / (iv * math.sqrt(T))
+    d2 = d1 - iv * math.sqrt(T)
+    return K * math.exp(-r * T) * N(-d2) - S * N(-d1)
+
+
+# ---------- Alpaca ----------
+ALPACA_KEY, ALPACA_SECRET = os.environ.get("ALPACA_API_KEY"), os.environ.get("ALPACA_SECRET_KEY")
+_ALPACA_ERR = {"printed": False}
+
+
+def _alpaca_get(url, params):
+    h = {"APCA-API-KEY-ID": ALPACA_KEY, "APCA-API-SECRET-KEY": ALPACA_SECRET}
+    out, tok = [], None
+    for _ in range(10):
+        q = dict(params)
+        if tok:
+            q["page_token"] = tok
+        r = requests.get(url, headers=h, params=q, timeout=20)
+        r.raise_for_status()
+        j = r.json()
+        out.append(j)
+        tok = j.get("next_page_token")
+        if not tok:
+            break
+    return out
+
+
+def alpaca_puts(tk, e):
+    """Put-Kette einer Laufzeit von Alpaca (Kurse, Delta, IV) plus Open Interest."""
+    if not (ALPACA_KEY and ALPACA_SECRET):
+        return None
+    try:
+        snaps = {}
+        for j in _alpaca_get(f"https://data.alpaca.markets/v1beta1/options/snapshots/{tk}",
+                             dict(feed="indicative", type="put", expiration_date=e, limit=1000)):
+            snaps.update(j.get("snapshots") or {})
+        oi = {}
+        try:
+            for j in _alpaca_get("https://paper-api.alpaca.markets/v2/options/contracts",
+                                 dict(underlying_symbols=tk, expiration_date=e, type="put", limit=1000)):
+                for c in j.get("option_contracts") or []:
+                    oi[c.get("symbol")] = int(float(c.get("open_interest") or 0))
+        except Exception as ex:
+            dlog(tk, f"Alpaca Open Interest nicht abrufbar: {ex}")
+        rows = []
+        for sym, sn in snaps.items():
+            q, g = sn.get("latestQuote") or {}, sn.get("greeks") or {}
+            rows.append(dict(strike=int(sym[-8:]) / 1000, bid=float(q.get("bp") or 0), ask=float(q.get("ap") or 0),
+                             openInterest=oi.get(sym, 0), impliedVolatility=float(sn.get("impliedVolatility") or 0),
+                             delta=abs(float(g.get("delta") or 0))))
+        return pd.DataFrame(rows).sort_values("strike").reset_index(drop=True) if rows else None
+    except Exception as ex:
+        if not _ALPACA_ERR["printed"]:
+            print(f"    Alpaca nicht erreichbar: {ex}")
+            _ALPACA_ERR["printed"] = True
+        dlog(tk, f"Alpaca {e} nicht abrufbar: {ex}")
+        return None
+
+
+def fill_from(df, other, cols_if_missing_price=("bid", "ask"), fill_zero=("openInterest", "impliedVolatility", "delta")):
+    """Ergänzt fehlende Werte in df je Strike aus other. Gibt Anzahl ergänzter Preise zurück."""
+    if other is None or not len(other):
+        return 0
+    o = other.drop_duplicates("strike").set_index("strike")
+    n = 0
+    for i in df.index:
+        K = df.at[i, "strike"]
+        if K not in o.index:
+            continue
+        r = o.loc[K]
+        if (df.at[i, "bid"] <= 0 or df.at[i, "ask"] <= 0) and float(r.get("bid") or 0) > 0 and float(r.get("ask") or 0) > 0:
+            for c in cols_if_missing_price:
+                df.at[i, c] = float(r.get(c) or 0)
+            n += 1
+        for c in fill_zero:
+            if c in df.columns and c in r.index and (pd.isna(df.at[i, c]) or not df.at[i, c]) and not pd.isna(r.get(c)):
+                df.at[i, c] = r.get(c)
+    return n
+
+
 # ---------- Eulerpool ----------
 _EP = None
 _EP_DEBUG = {"printed": 0}
@@ -273,7 +364,7 @@ def eulerpool_check(tk, t):
 
 
 # ---------- Optionsketten: Eulerpool zuerst, Yahoo als Ersatz ----------
-SOURCE_STATS = {"Eulerpool": 0, "Yahoo": 0, "Eulerpool + Yahoo-Preise": 0}
+SOURCE_STATS = {"Alpaca": 0, "Eulerpool": 0, "Yahoo": 0, "Eulerpool + Yahoo-Preise": 0}
 _EP_PARAM = {"name": None}   # welcher Parameter bei Eulerpool die Laufzeit wählt
 
 
@@ -339,6 +430,17 @@ class ChainSource:
             return None
 
     def puts(self, e):
+        a = alpaca_puts(self.tk, e)
+        if a is not None and len(a) and (a["bid"] > 0).any():
+            miss = int(((a["bid"] <= 0) | (a["ask"] <= 0)).sum())
+            dlog(self.tk, f"Alpaca {e}: {len(a)} Puts, davon {miss} ohne Preis")
+            if miss:
+                n = fill_from(a, self._ep_for(e))
+                if miss - n > 0.2 * len(a):
+                    n += fill_from(a, self._yahoo(e))
+                dlog(self.tk, f"Alpaca {e}: {n} fehlende Preise aus Eulerpool/Yahoo ergänzt")
+            SOURCE_STATS["Alpaca"] += 1
+            return a
         df = self._ep_for(e)
         if df is not None and len(df) and (df["bid"] > 0).any():
             missing = (df["bid"] <= 0) | (df["ask"] <= 0)
@@ -407,15 +509,22 @@ def best_put(t, price, support, max_delta, earn_date, src=None, tk=None):
                 _iv = float(o["impliedVolatility"]) if 0.05 < (o["impliedVolatility"] or 0) < 3 else iv_atm
                 _d = put_delta(price, K, T, _iv, CFG["risk_free"]) or 0
                 _m = (bid + ask) / 2
-                dlog(tk, f"  {e} Strike {K:g}: Geld {bid:.2f} / Brief {ask:.2f}, OI {oi}, Delta ca. {_d:.2f}, "
-                         f"{(_m / K * 365 / dte * 100) if _m > 0 else 0:.0f} % p. a.")
+                _t = put_price(price, K, T, _iv, CFG["risk_free"]) or 0
+                dlog(tk, f"  {e} Strike {K:g}: Geld {bid:.2f} / Brief {ask:.2f}, theor. {_t:.2f}, OI {oi}, "
+                         f"Delta ca. {_d:.2f}, {(_m / K * 365 / dte * 100) if _m > 0 else 0:.0f} % p. a. (Mitte)")
             if bid <= 0 or ask <= 0:
                 diag["kein Preis"] += 1; continue
             mid = (bid + ask) / 2
+            est = False
+            if (ask - bid) / mid > CFG["max_spread_pct"]:
+                iv_k = float(o["impliedVolatility"]) if 0.05 < (o["impliedVolatility"] or 0) < 3 else iv_atm
+                theo = put_price(price, K, T, iv_k, CFG["risk_free"])
+                if CFG["estimate_premium"] and theo and (ask - bid) / mid <= CFG["max_spread_est"]:
+                    mid, est = min(max(theo, bid), ask), True   # geschätzt, aber nie außerhalb Geld/Brief
+                else:
+                    diag["Spread zu breit"] += 1; continue
             if mid < CFG["min_premium"]:
                 diag["Prämie unter 0,10"] += 1; continue
-            if (ask - bid) / mid > CFG["max_spread_pct"]:
-                diag["Spread zu breit"] += 1; continue
             if oi < CFG["min_open_interest"]:
                 diag["Open Interest zu niedrig"] += 1; continue
             iv = float(o["impliedVolatility"]) if 0.05 < o["impliedVolatility"] < 3 else iv_atm
@@ -441,7 +550,7 @@ def best_put(t, price, support, max_delta, earn_date, src=None, tk=None):
                     near = dict(K=K, e=e, d=d, y=y, why=reason)
                 continue
             cand = dict(expiry=e, dte=dte, strike=K, premium=round(mid, 2), delta=round(d, 3),
-                        yield_pa=y, em=em, iv=iv_atm, oi=oi)
+                        yield_pa=y, em=em, iv=iv_atm, oi=oi, est=est, bid=bid, ask=ask)
             # Sicherheit zuerst: im Renditekorridor den Put mit dem niedrigsten Delta nehmen
             if best is None or d < best["delta"]:
                 best = cand
@@ -464,6 +573,7 @@ def cards_html(df, border=False):
         cards.append(f"""<article{' class="border"' if border else ''}>
 <h2>{i}. {r.ticker} <small>{r.name}</small></h2>
 <p class="put">Put {fmt(r.strike)} zum {dt.date.fromisoformat(r.expiry).strftime('%d.%m.%Y')} für ca. {fmt(r.premium)}</p>
+{f'<p class="estw">Prämie geschätzt (Daten: Geld {fmt(r.bid)} / Brief {fmt(r.ask)}). Echten Preis im Broker prüfen.</p>' if getattr(r, 'est', False) else ''}
 <dl>
 <div><dt>Rendite p. a.</dt><dd>{fmt(r.yield_pa*100,1)} %</dd></div>
 <div><dt>Delta</dt><dd>{fmt(r.delta)}</dd></div>
@@ -510,9 +620,10 @@ h2.section{{margin:28px 0 6px;font-size:22px;color:#B7791F}}
 article.border{{border:2px dashed #B7791F}}
 .signal{{font-size:14px;margin:10px 0 0;padding:6px 10px;border-radius:6px;background:#E8F3EC;color:#2E5E40}}
 .signal.warn2{{background:#FBF4E6;color:#7A5212}}
+.estw{{font-size:14px;margin:-6px 0 10px;color:#7A5212}}
 </style></head><body><main>
 <h1>Wheel-Screener</h1>
-<p class="sub">Stand {dt.datetime.now().strftime('%d.%m.%Y, %H:%M')} UTC, Yahoo-Daten, leicht verzögert</p>
+<p class="sub">Stand {dt.datetime.now().strftime('%d.%m.%Y, %H:%M')} UTC · Kurse: Yahoo · Optionen: {', '.join(k for k, v in SOURCE_STATS.items() if v) or 'keine'} (leicht verzögert)</p>
 <div class="market"><b>Markt: {regime}</b>. VIX {fmt(vix,1)}, S&amp;P 500 {'über' if above else 'unter'} der 200-Tage-Linie. Maximales Delta heute {fmt(max_delta)}.</div>
 {body}
 <p class="meta">Prämien vor dem Handel immer im Broker prüfen. Keine Anlageberatung.</p>
@@ -615,8 +726,8 @@ def main():
                             f"{nr['y']*100:.0f} % p. a., scheitert an: {nr['why']}") if nr else ""
                 print(f"  {tk}: Kurs {price:.2f}, Unterstützung {sup:.2f} ({(sup/price-1)*100:.1f} %) | {info_txt or 'keine Laufzeit im Zeitfenster'}{near_txt}")
                 continue
-            dlog(tk, f"Put gefunden: Strike {put['strike']} ({put['expiry']}), Prämie {put['premium']}, "
-                     f"Delta {put['delta']}, {put['yield_pa']*100:.0f} % p. a. ✓")
+            dlog(tk, f"Put gefunden: Strike {put['strike']} ({put['expiry']}), Prämie {put['premium']}"
+                     f"{' (geschätzt)' if put['est'] else ''}, Delta {put['delta']}, {put['yield_pa']*100:.0f} % p. a. ✓")
             aaqs, fair = eulerpool_check(tk, t)
             borderline = aaqs is not None and CFG["aaqs_borderline"] <= aaqs < CFG["min_aaqs"]
             if aaqs is not None and aaqs < CFG["aaqs_borderline"]:
