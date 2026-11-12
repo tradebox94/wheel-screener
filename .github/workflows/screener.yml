@@ -3,6 +3,11 @@ on:
   schedule:
     - cron: '0 15 * * 1-5'
   workflow_dispatch:
+    inputs:
+      diagnose:
+        description: 'Ticker zur Diagnose, z. B. CMG oder CMG,AMZN (leer lassen fuer normalen Scan)'
+        required: false
+        default: ''
 permissions:
   contents: write
 concurrency:
@@ -20,6 +25,7 @@ jobs:
       - run: python wheel_screener.py
         env:
           EULERPOOL_API_KEY: ${{ secrets.EULERPOOL_API_KEY }}
+          DIAGNOSE: ${{ github.event.inputs.diagnose }}
       - run: |
           git config user.name wheel-bot
           git config user.email wheel-bot@users.noreply.github.com
