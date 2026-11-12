@@ -4,13 +4,19 @@ Wheel-Screener: sucht täglich Cash-Secured Puts, die deine Wheel-Kriterien erf�
 
 Automatisch geprüft:
   Marktumfeld (VIX, S&P 500 über 200-Tage-Linie) -> maximales Delta
-  Trend dreht nach oben (über 200-Tage-Linie, RSI dreht aus Rücksetzer)
-  PowerX-Signal frisch grün (RSI 7, Stochastik 14/3/3, MACD 12/26/9)
+  Einstiegssignal im Wochenchart (wie in TradingView), erste Woche "grün":
+    TEMA 8 über TEMA 21, Stoch RSI (3,3,14,14) K über D und steigend,
+    MACD (12,26,9) Histogramm positiv. In der Vorwoche war es noch nicht grün.
+    In der ersten grünen Woche "neu, vorläufig" (Wochenkerze noch offen),
+    in der zweiten Woche "bestätigt" (Vorwoche grün abgeschlossen).
+    Kurs unter TEMA 200 ist kein Ausschluss, wird aber als Hinweis angezeigt.
+  Diagnose: Ticker im Feld "diagnose" beim manuellen Start (oder Umgebungs-
+    variable DIAGNOSE=CMG,AMZN) zeigt jedes Kriterium mit Ergebnis im Protokoll.
   KGV <= 50, Strike >= 15, Prämie >= 0,10, Rendite 20-40 % p. a.
   Analysten positiv, Kursziel deutlich über Kurs
   Earnings mindestens 30 Tage entfernt und erst nach dem Verfall
-  Put mit Laufzeit 7-21 Tage (ohne Wochenoptionen: nächste Monatsoption bis 28 Tage), Delta unter Grenze, Strike unter Unterstützung
-  (erwartete Bewegung wird angezeigt, ist aber keine Pflicht)
+  Put mit Laufzeit 7-21 Tage (ohne Wochenoptionen: nächste Monatsoption bis 28 Tage), Delta unter Grenze
+  (Unterstützung und erwartete Bewegung werden angezeigt, sind aber keine Pflicht)
   Liquidität (Open Interest, Spread), Mindestrendite
   Streuung: höchstens 2 Treffer pro Branche
 
@@ -49,16 +55,25 @@ CFG = dict(
     max_pe=50,                 # KGV höchstens 50
     risk_free=0.04,
     min_price=15,
-    powerx_fresh_days=10,      # PowerX muss in den letzten 10 Tagen auf grün gedreht sein
+    signal_weeks=2,            # 1. grüne Woche = "neu, vorläufig"; 2. Woche = "bestätigt" (Vorwoche grün abgeschlossen)
+    stoch_rising=True,         # Stoch RSI K muss gegenüber der Vorwoche steigen
     min_market_cap=10e9,       # nur große, liquide Werte
     max_per_sector=2,
     top_n=15,
     min_aaqs=6,
     aaqs_borderline=5,         # AAQS 5: als Grenzfall getrennt anzeigen (im Terminal prüfen)
     em_required=False,         # True = Strike muss außerhalb der erwarteten Bewegung liegen
+    support_required=False,    # True = Strike muss unter der Unterstützung liegen (verträgt sich nicht mit
+                               #        Einstieg direkt nach dem Dreh, deshalb nur angezeigt)
 )
 OUT_DIR = os.environ.get("OUT_DIR", "docs")
 TODAY = dt.date.today()
+DIAG = {x.strip().upper() for x in os.environ.get("DIAGNOSE", "").replace(";", ",").replace(" ", ",").split(",") if x.strip()}
+
+
+def dlog(tk, msg):
+    if tk in DIAG:
+        print(f"  [Diagnose {tk}] {msg}")
 
 
 # ---------- Universum & Markt ----------
@@ -91,34 +106,60 @@ def rsi(close, n=14):
     return 100 - 100 / (1 + up / dn)
 
 
-def trend_turn(df):
-    """Aufwärtstrend intakt und Aktie dreht nach einem Rücksetzer wieder nach oben."""
-    c = df["Close"].dropna()
-    if len(c) < 210:
-        return False
-    sma200 = c.rolling(200).mean().iloc[-1]
-    sma10 = c.rolling(10).mean().iloc[-1]
-    r = rsi(c)
-    r_min, r_now = r.iloc[-10:].min(), r.iloc[-1]
-    return c.iloc[-1] > sma200 and c.iloc[-1] > sma10 and r_min < 45 and r_now > r_min + 5 and r_now < 65
+def tema(x, n):
+    e1 = x.ewm(span=n, adjust=False).mean()
+    e2 = e1.ewm(span=n, adjust=False).mean()
+    e3 = e2.ewm(span=n, adjust=False).mean()
+    return 3 * e1 - 3 * e2 + e3
 
 
-def powerx_green_days(df):
-    """PowerX-Signal: RSI(7) > 50, Slow Stochastik(14,3,3) > 50, MACD(12,26,9) über Signallinie.
-    Gibt zurück, seit wie vielen Tagen das Signal grün ist (0 = heute nicht grün)."""
-    c, h, l = df["Close"], df["High"], df["Low"]
-    r7 = rsi(c, 7)
-    fast_k = (c - l.rolling(14).min()) / (h.rolling(14).max() - l.rolling(14).min()) * 100
-    slow_k = fast_k.rolling(3).mean()
+def to_weekly(df):
+    w = df[["Open", "High", "Low", "Close"]].dropna(how="all").resample("W-FRI").agg(
+        {"Open": "first", "High": "max", "Low": "min", "Close": "last"})
+    return w.dropna(subset=["Close"])
+
+
+def weekly_signal(df):
+    """Einstiegssignal im Wochenchart. Gibt ein Dict mit allen Werten zurück:
+    green_weeks = seit wie vielen Wochen grün (0 = diese Woche nicht grün)."""
+    w = to_weekly(df)
+    c = w["Close"]
+    t8, t21, t200 = tema(c, 8), tema(c, 21), tema(c, 200)
+    r = rsi(c, 14)
+    lo, hi = r.rolling(14).min(), r.rolling(14).max()
+    k = ((r - lo) / (hi - lo) * 100).rolling(3).mean()
+    d = k.rolling(3).mean()
     macd = c.ewm(span=12, adjust=False).mean() - c.ewm(span=26, adjust=False).mean()
-    hist = macd - macd.ewm(span=9, adjust=False).mean()
-    green = ((r7 > 50) & (slow_k > 50) & (hist > 0)).fillna(False).tolist()
+    sig = macd.ewm(span=9, adjust=False).mean()
+    hist = macd - sig
+    c_tema = t8 > t21
+    c_stoch = (k > d) & ((k > k.shift(1)) if CFG["stoch_rising"] else True)
+    c_macd = hist > 0
+    green = (c_tema & c_stoch & c_macd).fillna(False).tolist()
     n = 0
     for g in reversed(green):
         if not g:
             break
         n += 1
-    return n
+    last = lambda s: float(s.iloc[-1]) if len(s) and not pd.isna(s.iloc[-1]) else float("nan")
+    prev = lambda s: float(s.iloc[-2]) if len(s) > 1 and not pd.isna(s.iloc[-2]) else float("nan")
+    return dict(green_weeks=n, weeks=len(w), close=last(c),
+                tema8=last(t8), tema21=last(t21), tema200=last(t200),
+                k=last(k), d=last(d), k_prev=prev(k), hist=last(hist), hist_prev=prev(hist),
+                macd=last(macd), signal=last(sig),
+                ok_tema=bool(c_tema.iloc[-1]), ok_stoch=bool(c_stoch.iloc[-1]) if hasattr(c_stoch, "iloc") else True,
+                ok_macd=bool(c_macd.iloc[-1]),
+                below_tema200=bool(last(c) < last(t200)),
+                provisional=(n == 1 and TODAY.weekday() < 5))
+
+
+def signal_text(s):
+    j = lambda b: "✓" if b else "✗"
+    return (f"Woche: Kurs {s['close']:.2f} | TEMA 8 {s['tema8']:.2f} / 21 {s['tema21']:.2f} {j(s['ok_tema'])} | "
+            f"Stoch RSI K {s['k']:.1f} (Vorwoche {s['k_prev']:.1f}) / D {s['d']:.1f} {j(s['ok_stoch'])} | "
+            f"MACD-Hist {s['hist']:.4f} (Vorwoche {s['hist_prev']:.4f}) {j(s['ok_macd'])} | "
+            f"TEMA 200 {s['tema200']:.2f} ({'Kurs darunter' if s['below_tema200'] else 'Kurs darüber'}) | "
+            f"grün seit {s['green_weeks']} Woche(n)")
 
 
 def support_level(df, price):
@@ -232,7 +273,7 @@ def eulerpool_check(tk, t):
 
 
 # ---------- Optionsketten: Eulerpool zuerst, Yahoo als Ersatz ----------
-SOURCE_STATS = {"Eulerpool": 0, "Yahoo": 0}
+SOURCE_STATS = {"Eulerpool": 0, "Yahoo": 0, "Eulerpool + Yahoo-Preise": 0}
 _EP_PARAM = {"name": None}   # welcher Parameter bei Eulerpool die Laufzeit wählt
 
 
@@ -289,13 +330,42 @@ class ChainSource:
                 return df
         return None
 
+    def _yahoo(self, e):
+        try:
+            return self.t.option_chain(e).puts
+        except Exception as ex:
+            print(f"    Yahoo Optionen {self.tk} {e}: {ex}", file=sys.stderr)
+            return None
+
     def puts(self, e):
         df = self._ep_for(e)
         if df is not None and len(df) and (df["bid"] > 0).any():
+            missing = (df["bid"] <= 0) | (df["ask"] <= 0)
+            if missing.mean() > 0.2:
+                # Eulerpool liefert für viele Strikes keinen Preis: aus Yahoo ergänzen
+                y = self._yahoo(e)
+                if y is not None and len(y):
+                    y = y.set_index("strike")
+                    for i in df.index:
+                        K = df.at[i, "strike"]
+                        if K in y.index:
+                            yr = y.loc[K]
+                            if isinstance(yr, pd.DataFrame):
+                                yr = yr.iloc[0]
+                            if missing[i]:
+                                df.at[i, "bid"] = float(yr.get("bid") or 0)
+                                df.at[i, "ask"] = float(yr.get("ask") or 0)
+                            if not df.at[i, "openInterest"]:
+                                oi = yr.get("openInterest")
+                                df.at[i, "openInterest"] = 0 if pd.isna(oi) else int(oi)
+                            if not df.at[i, "impliedVolatility"]:
+                                df.at[i, "impliedVolatility"] = float(yr.get("impliedVolatility") or 0)
+                    SOURCE_STATS["Eulerpool + Yahoo-Preise"] += 1
+                    return df
             SOURCE_STATS["Eulerpool"] += 1
             return df
         SOURCE_STATS["Yahoo"] += 1
-        return self.t.option_chain(e).puts
+        return self._yahoo(e)
 
 
 # ---------- Optionen ----------
@@ -347,7 +417,7 @@ def best_put(t, price, support, max_delta, earn_date, src=None):
                 diag["Delta zu hoch"] += 1; continue
             y = mid / K * 365 / dte
             reason = None
-            if K >= support:
+            if CFG["support_required"] and K >= support:
                 reason = "nicht unter Unterstützung"
             elif CFG["em_required"] and K > price - em:
                 reason = "innerhalb erwarteter Bewegung"
@@ -388,7 +458,7 @@ def cards_html(df, border=False):
 <div><dt>Rendite p. a.</dt><dd>{fmt(r.yield_pa*100,1)} %</dd></div>
 <div><dt>Delta</dt><dd>{fmt(r.delta)}</dd></div>
 <div><dt>Kurs</dt><dd>{fmt(r.price)}</dd></div>
-<div><dt>Unterstützung</dt><dd>{fmt(r.support)}</dd></div>
+<div><dt>Unterstützung</dt><dd>{fmt(r.support)} {'(Strike darunter)' if r.strike < r.support else '(Strike darüber)'}</dd></div>
 <div><dt>Abstand zum Strike</dt><dd>{fmt((r.price-r.strike)/r.price*100,1)} %</dd></div>
 <div><dt>Erwartete Bewegung</dt><dd>±{fmt(r.em)} {'(Strike außerhalb)' if r.strike <= r.price - r.em else '(Strike innerhalb)'}</dd></div>
 <div><dt>Earnings</dt><dd>{r.earnings.strftime('%d.%m.%Y')}</dd></div>
@@ -396,7 +466,8 @@ def cards_html(df, border=False):
 <div><dt>AAQS</dt><dd>{ep_txt(r.aaqs, 1)}</dd></div>
 <div><dt>Fair Value</dt><dd>{ep_txt(r.fair_value)}{'' if r.fair_value is None or pd.isna(r.fair_value) else f" (Kurs {fmt((1-r.price/r.fair_value)*100,0)} % darunter)"}</dd></div>
 </dl>
-<p class="meta">{r.sector}, KGV {fmt(r.pe,1)}, PowerX grün seit {r.powerx_days} Tag{'en' if r.powerx_days>1 else ''}, Open Interest {r.oi}.</p>
+<p class="signal{' warn2' if r.below_tema200 else ''}">Wochensignal: {'NEU diese Woche, vorläufig (Wochenkerze schließt Freitag)' if r.provisional else ('bestätigt, letzte Woche grün geschlossen' if r.signal_weeks >= 2 else 'bestätigt')}{f" · Kurs unter TEMA 200 ({fmt(r.tema200)}): Gegentrend, höheres Risiko" if r.below_tema200 else ''}</p>
+<p class="meta">{r.sector}, KGV {fmt(r.pe,1)}, Open Interest {r.oi}.</p>
 </article>""")
     return "\n".join(cards)
 
@@ -427,6 +498,8 @@ dl{{display:grid;grid-template-columns:1fr 1fr;gap:6px 12px;margin:0}} dt{{font-
 h2.section{{margin:28px 0 6px;font-size:22px;color:#B7791F}}
 .warn{{background:#FBF4E6;border-left:5px solid #B7791F;padding:10px 12px;border-radius:0 8px 8px 0;font-size:15px}}
 article.border{{border:2px dashed #B7791F}}
+.signal{{font-size:14px;margin:10px 0 0;padding:6px 10px;border-radius:6px;background:#E8F3EC;color:#2E5E40}}
+.signal.warn2{{background:#FBF4E6;color:#7A5212}}
 </style></head><body><main>
 <h1>Wheel-Screener</h1>
 <p class="sub">Stand {dt.datetime.now().strftime('%d.%m.%Y, %H:%M')} UTC, Yahoo-Daten, leicht verzögert</p>
@@ -443,50 +516,88 @@ def main():
     vix, above, max_delta, regime = market_regime()
     print(f"Markt: {regime}, VIX {vix:.1f}, max. Delta {max_delta}")
     tickers = load_universe()
+    for tk in DIAG:
+        if tk not in tickers:
+            tickers.append(tk)
     print(f"Scanne {len(tickers)} Aktien ...")
-    hist = yf.download(tickers, period="1y", group_by="ticker", auto_adjust=True, threads=True, progress=False)
+    if DIAG:
+        print(f"Diagnose für: {', '.join(sorted(DIAG))}")
+    # 10 Jahre Tageskurse, damit die Wochen-TEMA 200 sauber berechnet wird
+    hist = yf.download(tickers, period="10y", group_by="ticker", auto_adjust=True, threads=True, progress=False)
 
     stage1 = []
-    funnel = {"Trend dreht nach oben": 0, "PowerX frisch grün": 0}
+    n_green, n_below = 0, 0
     for tk in tickers:
         try:
             df = hist[tk].dropna(how="all") if len(tickers) > 1 else hist.dropna(how="all")
         except KeyError:
+            dlog(tk, "keine Kursdaten von Yahoo")
             continue
         if len(df) < 210:
+            dlog(tk, f"zu wenig Kursdaten ({len(df)} Tage)")
             continue
         price = float(df["Close"].iloc[-1])
-        if price < CFG["min_price"] or not trend_turn(df):
+        if price < CFG["min_price"]:
+            dlog(tk, f"Kurs {price:.2f} unter Mindestkurs {CFG['min_price']} ✗")
             continue
-        funnel["Trend dreht nach oben"] += 1
-        gd = powerx_green_days(df)
-        if 1 <= gd <= CFG["powerx_fresh_days"]:
-            funnel["PowerX frisch grün"] += 1
-            stage1.append((tk, df, price, gd))
-    print(f"{funnel['Trend dreht nach oben']} Aktien mit Trenddreh, davon {len(stage1)} mit frischem PowerX-Signal.")
+        sig = weekly_signal(df)
+        fresh = 1 <= sig["green_weeks"] <= CFG["signal_weeks"]
+        dlog(tk, signal_text(sig))
+        if fresh:
+            n_green += 1
+            n_below += sig["below_tema200"]
+            dlog(tk, f"Einstiegssignal ✓ ({'neu, vorläufig, Wochenkerze noch offen' if sig['provisional'] else 'bestätigt'})")
+            stage1.append((tk, df, price, sig, False))
+        elif tk in DIAG:
+            why = ("diese Woche nicht grün" if sig["green_weeks"] == 0
+                   else f"schon seit {sig['green_weeks']} Wochen grün, kein frisches Signal")
+            dlog(tk, f"Einstiegssignal ✗ ({why}), die weiteren Kriterien werden trotzdem geprüft")
+            stage1.append((tk, df, price, sig, True))
+    print(f"{n_green} Aktien mit frischem Wochensignal, davon {n_below} unter TEMA 200.")
     print("Prüfe Fundamentaldaten und Optionen ...")
     drop = {k: 0 for k in ["Marktkapitalisierung", "Analysten/Kursziel", "KGV über 50", "Earnings zu nah",
                            "Kein passender Put", "AAQS unter 5", "Nicht unterbewertet", "Fehler"]}
 
     rows = []
-    for tk, df, price, gd in stage1:
+    for tk, df, price, sig, diag_only in stage1:
         try:
+            # diag_only: Aktie ohne Signal, nur für die Diagnose geprüft (nicht in Zählung und Ergebnis)
+            def fail(key, msg):
+                if not diag_only:
+                    drop[key] += 1
+                dlog(tk, msg + " ✗")
             t = yf.Ticker(tk)
             info = t.info
             rec, tgt = info.get("recommendationMean"), info.get("targetMeanPrice")
-            if (info.get("marketCap") or 0) < CFG["min_market_cap"]:
-                drop["Marktkapitalisierung"] += 1; continue
+            mcap = info.get("marketCap") or 0
+            if mcap < CFG["min_market_cap"]:
+                fail("Marktkapitalisierung", f"Marktkapitalisierung {mcap/1e9:.1f} Mrd. unter {CFG['min_market_cap']/1e9:.0f} Mrd."); continue
+            dlog(tk, f"Marktkapitalisierung {mcap/1e9:.1f} Mrd. ✓")
             if rec is None or rec > CFG["max_rec_mean"] or not tgt or tgt < price * (1 + CFG["min_target_upside"]):
-                drop["Analysten/Kursziel"] += 1; continue
+                fail("Analysten/Kursziel", f"Analysten {rec} (max. {CFG['max_rec_mean']}), Kursziel {tgt} "
+                     f"({'–' if not tgt else f'{(tgt/price-1)*100:+.1f} %'}, mind. +{CFG['min_target_upside']*100:.0f} %)"); continue
+            dlog(tk, f"Analysten {rec}, Kursziel {tgt} ({(tgt/price-1)*100:+.1f} %) ✓")
             pe = info.get("trailingPE")
             if pe is None or pe <= 0 or pe > CFG["max_pe"]:
-                drop["KGV über 50"] += 1; continue
+                fail("KGV über 50", f"KGV {pe} (max. {CFG['max_pe']})"); continue
+            dlog(tk, f"KGV {pe:.1f} ✓")
             earn = next_earnings(t)
             if earn is None or (earn - TODAY).days < CFG["min_days_to_earnings"]:
-                drop["Earnings zu nah"] += 1; continue
+                fail("Earnings zu nah", f"Earnings {earn} (mind. {CFG['min_days_to_earnings']} Tage)"); continue
+            dlog(tk, f"Earnings {earn} ({(earn-TODAY).days} Tage) ✓")
             sup = support_level(df, price)
             put, diag = best_put(t, price, sup, max_delta, earn, ChainSource(tk, t))
+            if tk in DIAG:
+                nr = diag.get("near")
+                dlog(tk, f"Unterstützung {sup:.2f} ({(sup/price-1)*100:.1f} %), max. Delta {max_delta}, "
+                         f"Rendite {CFG['min_yield_pa']*100:.0f}-{CFG['max_yield_pa']*100:.0f} % p. a., Laufzeit {CFG['min_dte']}-{CFG['max_dte']} Tage")
+                dlog(tk, "Puts: " + ", ".join(f"{k} {v}" for k, v in diag.items() if k != "near" and v))
+                if nr:
+                    dlog(tk, f"bester knapper Put: Strike {nr['K']:g} ({nr['e']}), Delta {nr['d']:.2f}, "
+                             f"{nr['y']*100:.0f} % p. a., scheitert an: {nr['why']}")
             if not put:
+                if diag_only:
+                    dlog(tk, "kein passender Put ✗"); continue
                 drop["Kein passender Put"] += 1
                 nr = diag.pop("near")
                 info_txt = ", ".join(f"{k} {v}" for k, v in diag.items() if v)
@@ -494,25 +605,37 @@ def main():
                             f"{nr['y']*100:.0f} % p. a., scheitert an: {nr['why']}") if nr else ""
                 print(f"  {tk}: Kurs {price:.2f}, Unterstützung {sup:.2f} ({(sup/price-1)*100:.1f} %) | {info_txt or 'keine Laufzeit im Zeitfenster'}{near_txt}")
                 continue
+            dlog(tk, f"Put gefunden: Strike {put['strike']} ({put['expiry']}), Prämie {put['premium']}, "
+                     f"Delta {put['delta']}, {put['yield_pa']*100:.0f} % p. a. ✓")
             aaqs, fair = eulerpool_check(tk, t)
             borderline = aaqs is not None and CFG["aaqs_borderline"] <= aaqs < CFG["min_aaqs"]
             if aaqs is not None and aaqs < CFG["aaqs_borderline"]:
-                drop["AAQS unter 5"] += 1
+                if not diag_only:
+                    drop["AAQS unter 5"] += 1
                 print(f"  {tk}: AAQS {aaqs} zu niedrig")
                 continue
+            dlog(tk, f"AAQS {aaqs} {'(Grenzfall)' if borderline else '✓'}")
             if fair is not None and price >= fair:
-                drop["Nicht unterbewertet"] += 1
+                if not diag_only:
+                    drop["Nicht unterbewertet"] += 1
                 print(f"  {tk}: nicht unterbewertet (Kurs {price:.2f}, Fair Value {fair:.2f})")
+                continue
+            dlog(tk, f"Fair Value {fair} ✓")
+            if diag_only:
+                dlog(tk, "alle übrigen Kriterien erfüllt, es fehlt nur das frische Wochensignal")
                 continue
             rows.append(dict(ticker=tk, name=info.get("shortName", tk), sector=info.get("sector", "Unbekannt"),
                              price=price, support=sup, rec=rec, target=tgt, upside=tgt / price - 1,
-                             earnings=earn, aaqs=aaqs, fair_value=fair, pe=pe, powerx_days=gd,
+                             earnings=earn, aaqs=aaqs, fair_value=fair, pe=pe,
+                             signal_weeks=sig["green_weeks"], provisional=sig["provisional"],
+                             below_tema200=sig["below_tema200"], tema200=sig["tema200"],
                              grenzfall=borderline, **put))
-            print(f"  {'Grenzfall (AAQS 5)' if borderline else 'Treffer'}: {tk} Put {put['strike']} {put['expiry']}")
+            print(f"  {'Grenzfall (AAQS 5)' if borderline else 'Treffer'}: {tk} Put {put['strike']} {put['expiry']}"
+                  f"{' (unter TEMA 200)' if sig['below_tema200'] else ''}")
         except Exception as ex:
             drop["Fehler"] += 1
             print(f"  {tk}: übersprungen ({ex})", file=sys.stderr)
-    print(f"Optionsketten: Eulerpool {SOURCE_STATS['Eulerpool']}, Yahoo {SOURCE_STATS['Yahoo']}")
+    print("Optionsketten: " + ", ".join(f"{k} {v}" for k, v in SOURCE_STATS.items()))
     print("Ausgeschieden nach Kriterium:")
     for k, v in drop.items():
         print(f"  {k}: {v}")
