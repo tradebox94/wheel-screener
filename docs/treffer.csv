@@ -1,2 +1,1 @@
-ticker,name,sector,price,support,rec,target,upside,earnings,aaqs,fair_value,pe,signal_weeks,provisional,below_tema200,tema200,grenzfall,expiry,dte,strike,premium,delta,yield_pa,em,iv,oi,est,bid,ask,abstand_em,score
-BSX,Boston Scientific Corporation,Healthcare,43.689998626708984,42.779998779296875,1.93548,49.59857,0.13523853419576293,2027-01-21,5.0,,18.434599,1,True,True,69.09383067166303,True,2026-11-27,11,41.0,0.29,0.172,0.2385451844445479,2.8062972163570965,0.37,53,True,0.22,0.37,0.9585579927278404,0.67705629113145
+
