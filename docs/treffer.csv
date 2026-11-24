@@ -1,9 +1,1 @@
-ticker,name,sector,price,support,rec,target,upside,earnings,aaqs,fair_value,pe,signal_weeks,provisional,below_tema200,tema200,grenzfall,expiry,dte,strike,premium,delta,yield_pa,em,iv,oi,est,bid,ask,abstand_em,score
-BRO,"Brown & Brown, Inc.",Financial Services,,58.86022530028633,2.47619,76.0,,2027-01-19,8.0,107.99067161124103,23.015823,1,True,True,77.48400303691042,False,2026-12-18,24,60.0,,0.051,,,2.2302,77,True,0.15,0.6,,
-CDW,CDW Corporation,Technology,,127.7699966430664,1.8,185.88889,,2027-01-28,8.0,224.78708140926926,19.843641,1,True,False,136.87832164364298,False,2026-12-18,24,140.0,,0.054,,,2.3528,266,True,0.6,3.4,,
-CMG,"Chipotle Mexican Grill, Inc.",Consumer Cyclical,,27.309999465942383,1.82857,40.64516,,2027-01-21,8.0,45.48723701968054,33.8785,2,False,True,37.36980783292597,False,2026-12-11,17,32.0,,0.067,,,0.3,1405,True,0.03,0.16,,
-HIG,"The Hartford Insurance Group, I",Financial Services,,120.41999816894531,2.5,145.38095,,2027-01-19,6.0,,9.170683,2,False,True,145.65901586021468,False,2026-12-18,24,115.0,,0.041,,,1.1038,78,True,0.08,0.42,,
-SYK,Stryker Corporation,Healthcare,,266.1571486951177,1.8,341.48407,,2027-01-22,7.0,,33.668797,1,True,True,346.1749296428135,False,2026-12-18,24,270.0,,0.077,,,1.0814,227,True,0.48,2.23,,
-TMUS,"T-Mobile US, Inc.",Communication Services,,143.75,1.60714,226.24,,2027-01-21,7.0,,16.04243,2,False,True,204.26151152173475,False,2026-12-04,10,150.0,,0.102,,,1.983,167,True,0.32,0.98,,
-TJX,"TJX Companies, Inc. (The)",Consumer Cyclical,,122.34805043094192,1.69565,165.55,,2027-02-11,8.0,149.0309313906826,25.272232,1,True,True,158.55208942007647,False,2026-12-11,17,125.0,,0.03,,,1.4992,104,True,0.15,0.35,,
-WM,"Waste Management, Inc.",Industrials,,200.5800018310547,1.75,256.84,,2027-01-20,7.0,241.87729464999188,31.57349,1,True,False,237.66588657442742,False,2026-12-18,24,180.0,,0.012,,,1.6527,71,True,0.07,0.22,,
+
